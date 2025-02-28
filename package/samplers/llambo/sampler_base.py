@@ -4,7 +4,7 @@ import time
 from typing import Any
 from typing import Optional
 
-from llambo.llambo import LLAMBO
+from .llambo.llambo import LLAMBO
 import optuna
 from optuna.samplers import RandomSampler
 from optuna.samplers._lazy_random_state import LazyRandomState

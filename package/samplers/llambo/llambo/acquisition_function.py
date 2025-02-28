@@ -8,7 +8,7 @@ from typing import Optional
 
 from langchain import FewShotPromptTemplate
 from langchain import PromptTemplate
-from llambo.rate_limiter import apply_rate_limit
+from .rate_limiter import apply_rate_limit
 from LLM_utils.inquiry import OpenAI_interface
 import numpy as np
 import pandas as pd
