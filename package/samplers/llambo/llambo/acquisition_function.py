@@ -685,21 +685,26 @@ class LLM_ACQ:
         if self.warping_transformer is not None:
             observed_configs = self.warping_transformer.warp(observed_configs)
 
-        prompt_templates, query_templates = self._gen_prompt_templates_acquisitions(
-            observed_configs,
-            observed_fvals,
-            desired_fval,
-            n_prompts=self.n_templates,
-            use_feature_semantics=use_feature_semantics,
-            shuffle_features=self.shuffle_features,
-        )
+        try:
+            prompt_templates, query_templates = self._gen_prompt_templates_acquisitions(
+                observed_configs,
+                observed_fvals,
+                desired_fval,
+                n_prompts=self.n_templates,
+                use_feature_semantics=use_feature_semantics,
+                shuffle_features=self.shuffle_features,
+            )
 
-        print("=" * 100)
-        print("EXAMPLE ACQUISITION PROMPT")
-        print(f"Length of prompt templates: {len(prompt_templates)}")
-        print(f"Length of query templates: {len(query_templates)}")
-        print(prompt_templates[0].format(A=query_templates[0][0]["A"]))
-        print("=" * 100)
+            print("=" * 100)
+            print("EXAMPLE ACQUISITION PROMPT")
+            print(f"Length of prompt templates: {len(prompt_templates)}")
+            print(f"Length of query templates: {len(query_templates)}")
+            print(prompt_templates[0].format(A=query_templates[0][0]["A"]))
+            print("=" * 100)
+        except Exception as e:
+            print(f"Error generating prompt templates: {e}")
+            end_time = time.time()
+            return pd.DataFrame(), 0.0, end_time - start_time
 
         number_candidate_points = 0
         filtered_candidate_points = pd.DataFrame()
@@ -707,57 +712,86 @@ class LLM_ACQ:
 
         retry = 0
         while number_candidate_points < 5:
-            llm_responses = asyncio.run(
-                self._async_generate_concurrently(prompt_templates, query_templates)
-            )
-
-            candidate_points = []
-
-            for response in llm_responses:
-                if response is None:
-                    continue
-
-                # Unpack the tuple properly
-                response_content, cost = response
-                tot_cost += cost
-
-                try:
-                    response_content = response_content.split("##")[1].strip()
-                    candidate_points.append(self._convert_to_json(response_content))
-                except Exception:
-                    print(response_content)
-                    continue
-
-            proposed_points = self._filter_candidate_points(
-                observed_configs.to_dict(orient="records"), candidate_points
-            )
-
-            # Check if proposed_points is not empty before concatenating
-            if not proposed_points.empty:
-                filtered_candidate_points = pd.concat(
-                    [filtered_candidate_points, proposed_points], ignore_index=True
+            try:
+                # Using a separate try block to ensure proper coroutine cleanup
+                llm_responses = asyncio.run(
+                    self._async_generate_concurrently(prompt_templates, query_templates)
                 )
 
-            number_candidate_points = filtered_candidate_points.shape[0]
+                candidate_points = []
 
-            print(
-                f"Attempt: {retry}, number of proposed candidate points: {len(candidate_points)}, ",
-                f"number of accepted candidate points: {filtered_candidate_points.shape[0]}",
-            )
+                for response in llm_responses:
+                    if response is None:
+                        continue
+
+                    # Unpack the tuple properly
+                    response_content, cost = response
+                    tot_cost += cost
+
+                    try:
+                        response_content = response_content.split("##")[1].strip()
+                        candidate_points.append(self._convert_to_json(response_content))
+                    except Exception as parse_error:
+                        print(f"Error parsing response content: {parse_error}")
+                        print(response_content)
+                        continue
+
+                proposed_points = self._filter_candidate_points(
+                    observed_configs.to_dict(orient="records"), candidate_points
+                )
+
+                # Check if proposed_points is not empty before concatenating
+                if not proposed_points.empty:
+                    filtered_candidate_points = pd.concat(
+                        [filtered_candidate_points, proposed_points], ignore_index=True
+                    )
+
+                number_candidate_points = filtered_candidate_points.shape[0]
+
+                print(
+                    f"Attempt: {retry}, number of proposed candidate points: {len(candidate_points)}, ",
+                    f"number of accepted candidate points: {filtered_candidate_points.shape[0]}",
+                )
+
+            except Exception as e:
+                print(f"Error in generating or processing candidate points: {e}")
+                # Add backoff before retrying
+                backoff_time = min(
+                    2**retry * 0.5, 5
+                )  # Exponential backoff with maximum of 5 seconds
+                print(f"Backing off for {backoff_time:.2f} seconds before retry")
+                time.sleep(backoff_time)
 
             retry += 1
             if retry > 10:
                 print(f"Desired fval: {desired_fval:.6f}")
-                print(f"Number of proposed candidate points: {len(candidate_points)}")
+                print(
+                    f"Number of proposed candidate points: {len(candidate_points) if 'candidate_points' in locals() else 0}"
+                )
                 print(f"Number of accepted candidate points: {filtered_candidate_points.shape[0]}")
-                if len(candidate_points) > 5:
+
+                # Even if we've failed to generate points through LLM, check if we have any valid candidates
+                if "candidate_points" in locals() and len(candidate_points) > 5:
                     filtered_candidate_points = pd.DataFrame(candidate_points)
                     break
+                elif filtered_candidate_points.shape[0] > 0:
+                    # If we have at least some valid candidates, use those instead of raising an error
+                    print("Using partial results instead of failing completely")
+                    break
                 else:
-                    raise RuntimeError("LLM failed to generate candidate points after 10 retries")
+                    print("LLM failed to generate candidate points after 10 retries")
+                    # Return empty DataFrame instead of raising exception to avoid crashing
+                    # This makes the code more resilient in notebook environments
+                    break
 
-        if self.warping_transformer is not None:
-            filtered_candidate_points = self.warping_transformer.unwarp(filtered_candidate_points)
+        if self.warping_transformer is not None and not filtered_candidate_points.empty:
+            try:
+                filtered_candidate_points = self.warping_transformer.unwarp(
+                    filtered_candidate_points
+                )
+            except Exception as e:
+                print(f"Error unwarping candidate points: {e}")
+                # If unwarping fails, return the warped points as a fallback
 
         end_time = time.time()
         time_taken = end_time - start_time
